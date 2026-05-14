@@ -28,7 +28,7 @@ import {
 	type ExtensionContext,
 	type KeybindingsManager,
 	type SlashCommandInfo,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import {
 	CombinedAutocompleteProvider,
 	Key,
@@ -40,7 +40,7 @@ import {
 	type AutocompleteSuggestions,
 	type EditorTheme,
 	type TUI,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 

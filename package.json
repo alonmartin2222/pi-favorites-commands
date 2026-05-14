@@ -1,6 +1,6 @@
 {
   "name": "pi-favorites-commands",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Star and reorder your favorite slash commands in pi. Favorites appear at the top of the / autocomplete dropdown with a ★ glyph, in the order you choose.",
   "keywords": [
     "pi-package",
@@ -25,7 +25,12 @@
     "node": ">=20"
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": false
+    }
   },
   "pi": {
     "extensions": [
