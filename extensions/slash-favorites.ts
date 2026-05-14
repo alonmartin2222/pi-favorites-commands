@@ -8,16 +8,17 @@
  * Persistence: ~/.pi/agent/data/slash-favorites.json   (ordered array)
  *
  * Implementation:
- *   Instead of replacing pi's editor (which would clobber other extensions
- *   that style/customize the editor — and break pi's welcome screen), we
- *   monkey-patch `CombinedAutocompleteProvider.prototype.getSuggestions`
- *   once. The patch only modifies slash-command results:
+ *   Uses pi's official `ctx.ui.addAutocompleteProvider(factory)` hook to
+ *   wrap pi's built-in autocomplete provider. The wrapper delegates to the
+ *   inner provider and post-processes slash-command results:
  *     - When prefix is exactly "/", reorders items so favorites come first
- *       in user order, with non-favorites following.
+ *       in user-defined order, with non-favorites following.
  *     - Decorates every slash item's label with ★ (yellow) for starred
  *       entries, "  " (two spaces) for unstarred — so columns align.
- *   Original `item.value` is left untouched so completion still inserts
- *   the bare `/name`.
+ *   `item.value` is left untouched so completion still inserts `/name`.
+ *
+ *   Pi's editor is never replaced — welcome screen, prompt styling, and
+ *   every other editor-related extension keep working unchanged.
  */
 
 import type {
@@ -25,8 +26,12 @@ import type {
 	ExtensionContext,
 	SlashCommandInfo,
 } from "@earendil-works/pi-coding-agent";
+import type {
+	AutocompleteItem,
+	AutocompleteProvider,
+	AutocompleteSuggestions,
+} from "@earendil-works/pi-tui";
 import {
-	CombinedAutocompleteProvider,
 	Key,
 	matchesKey,
 	truncateToWidth,
@@ -158,50 +163,51 @@ class FavStore {
 	}
 }
 
-// ─── Prototype patch (the only side effect on pi) ────────────────────────────
-let patched = false;
+// ─── Autocomplete wrapper (uses pi's official factory hook) ──────────────────
+function makeWrapperFactory(favs: FavStore) {
+	return (current: AutocompleteProvider): AutocompleteProvider => {
+		return {
+			async getSuggestions(
+				lines: string[],
+				cursorLine: number,
+				cursorCol: number,
+				options: { signal: AbortSignal; force?: boolean },
+			): Promise<AutocompleteSuggestions | null> {
+				const result = await current.getSuggestions(lines, cursorLine, cursorCol, options);
+				if (!result) return result;
+				const prefix = result.prefix ?? "";
+				// Only touch slash-command results — leave @file / path completion alone.
+				const isSlash = prefix.startsWith("/") && !prefix.slice(1).includes("/");
+				if (!isSlash) return result;
 
-function patchAutocomplete(favs: FavStore) {
-	if (patched) return;
-	patched = true;
-	const proto = CombinedAutocompleteProvider.prototype as any;
-	const original = proto.getSuggestions;
-	if (typeof original !== "function") return;
-	proto.getSuggestions = async function patchedGetSuggestions(
-		lines: string[],
-		cursorLine: number,
-		cursorCol: number,
-		options: any,
-	) {
-		const result = await original.call(this, lines, cursorLine, cursorCol, options);
-		if (!result) return result;
-		const prefix: string = result.prefix ?? "";
-		// Only touch slash-command results — leave @file / path completion alone.
-		const isSlash = prefix.startsWith("/") && !prefix.slice(1).includes("/");
-		if (!isSlash) return result;
-
-		let items = result.items as Array<{ value: string; label?: string; description?: string }>;
-		// When the user has typed just "/" (no query yet), surface favorites first
-		// in user-defined order. For "/foo" we keep the fuzzy ranking pi computed.
-		if (prefix === "/") {
-			const order = favs.list();
-			const favSet = new Set(order);
-			const byName = new Map(items.map((it) => [it.value, it]));
-			const favList: typeof items = [];
-			for (const name of order) {
-				const it = byName.get(name);
-				if (it) favList.push(it);
-			}
-			const rest = items.filter((it) => !favSet.has(it.value));
-			items = [...favList, ...rest];
-		}
-		// Decorate labels with ★ regardless of query so the marker is always visible.
-		items = items.map((it) => {
-			const baseLabel = it.label || it.value;
-			const prefixChar = favs.has(it.value) ? STAR_LABEL_PREFIX : PLAIN_LABEL_PREFIX;
-			return { ...it, label: `${prefixChar}${baseLabel}` };
-		});
-		return { ...result, items };
+				let items = result.items;
+				// When the user has typed just "/" (no query yet), surface favorites first
+				// in user-defined order. For "/foo" we keep the fuzzy ranking pi computed.
+				if (prefix === "/") {
+					const order = favs.list();
+					const favSet = new Set(order);
+					const byValue = new Map(items.map((it) => [it.value, it]));
+					const favList: AutocompleteItem[] = [];
+					for (const name of order) {
+						const it = byValue.get(name);
+						if (it) favList.push(it);
+					}
+					const rest = items.filter((it) => !favSet.has(it.value));
+					items = [...favList, ...rest];
+				}
+				// Decorate labels with ★ regardless of query so the marker is always visible.
+				items = items.map((it) => {
+					const baseLabel = it.label || it.value;
+					const marker = favs.has(it.value) ? STAR_LABEL_PREFIX : PLAIN_LABEL_PREFIX;
+					return { ...it, label: `${marker}${baseLabel}` };
+				});
+				return { ...result, items };
+			},
+			applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+				return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+			},
+			shouldTriggerFileCompletion: current.shouldTriggerFileCompletion?.bind(current),
+		};
 	};
 }
 
@@ -423,7 +429,18 @@ class FavoritesPicker {
 // ─── Entry ───────────────────────────────────────────────────────────────────
 export default function (pi: ExtensionAPI) {
 	const favs = new FavStore(loadOrder());
-	patchAutocomplete(favs);
+	const factory = makeWrapperFactory(favs);
+	let installed = false;
+
+	const installProvider = (ctx: ExtensionContext) => {
+		if (installed || !ctx.hasUI) return;
+		ctx.ui.addAutocompleteProvider(factory);
+		installed = true;
+	};
+
+	pi.on("session_start", (_ev, ctx) => {
+		installProvider(ctx);
+	});
 
 	pi.registerCommand("favorites", {
 		description: "Star/unstar slash commands so favorites appear first when you type /",
@@ -432,9 +449,9 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("/favorites requires an interactive UI", "error");
 				return;
 			}
-			// Guard: patch should already be applied at module load, but if pi
-			// hot-reloaded the module the closure may have changed — re-apply.
-			patchAutocomplete(favs);
+			// In case /reload happened: session_start does not refire on /reload,
+			// so lazily install the provider here if not already.
+			installProvider(ctx);
 
 			const all = getAllCommands(pi);
 			await ctx.ui.custom<void>(
