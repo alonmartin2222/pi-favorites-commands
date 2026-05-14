@@ -1,0 +1,40 @@
+{
+  "name": "pi-favorites-commands",
+  "version": "0.1.0",
+  "description": "Star and reorder your favorite slash commands in pi. Favorites appear at the top of the / autocomplete dropdown with a ★ glyph, in the order you choose.",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "slash-commands",
+    "autocomplete",
+    "favorites",
+    "productivity"
+  ],
+  "author": "Alon Martin",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alonmartin2222/pi-favorites-commands.git"
+  },
+  "homepage": "https://github.com/alonmartin2222/pi-favorites-commands#readme",
+  "bugs": {
+    "url": "https://github.com/alonmartin2222/pi-favorites-commands/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/slash-favorites.ts"
+    ]
+  },
+  "files": [
+    "extensions/",
+    "README.md",
+    "LICENSE"
+  ]
+}
