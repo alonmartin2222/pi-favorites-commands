@@ -5,7 +5,7 @@
 
 | `/favorites` manager | `/` dropdown |
 | :---: | :---: |
-| ![favorites manager](./assets/favorites-manager.png) | ![autocomplete dropdown](./assets/autocomplete-dropdown.png) |
+| ![favorites manager](https://raw.githubusercontent.com/alonmartin2222/pi-favorites-commands/main/assets/favorites-manager.png) | ![autocomplete dropdown](https://raw.githubusercontent.com/alonmartin2222/pi-favorites-commands/main/assets/autocomplete-dropdown.png) |
 
 ## Why
 
