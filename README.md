@@ -3,24 +3,9 @@
 > Star and reorder your favorite slash commands in [pi](https://github.com/badlogic/pi-mono).
 > Favorites appear at the top of the `/` autocomplete dropdown with a ★ glyph, in the order you choose.
 
-```
-/                            /favorites
-─────────────────────        ──────────────────────────────────
-★ /code      ←─ favs         ╭─ ★ Slash Favorites — 4/86 starred ──╮
-★ /jira         (in your     │  / type to filter                   │
-★ /session-diff   order)     │ ─────────────────────────────────── │
-★ /copy-response             │ ▌ 1  ★  /code         Open VS Code …│
-  /changelog ←─ rest         │   2  ★  /jira         …             │
-  /compact      (alpha)      │   3  ★  /session-diff …             │
-  /export                    │   4  ★  /copy-response …            │
-  /favorites                 │  ─────────────────────────────────  │
-  /favorites                 │      ☆  /changelog    …             │
-  …                          │      ☆  /compact      …             │
-                             │      ☆  /export       …             │
-                             ╰─────────────────────────────────────╯
-                              ↑↓ navigate · space toggle ★
-                              · ⇧↑↓ reorder ★ · ⏎/esc save & close
-```
+| `/favorites` manager | `/` dropdown |
+| :---: | :---: |
+| ![favorites manager](./assets/favorites-manager.png) | ![autocomplete dropdown](./assets/autocomplete-dropdown.png) |
 
 ## Why
 
