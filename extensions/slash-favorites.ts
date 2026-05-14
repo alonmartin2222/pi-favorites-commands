@@ -7,27 +7,23 @@
  *
  * Persistence: ~/.pi/agent/data/slash-favorites.json   (ordered array)
  *
- * Features:
- *   - Manual ordering of favorites (Shift+↑ / Shift+↓ in the picker swaps
- *     adjacent stars; this order is mirrored in the autocomplete dropdown).
- *   - The autocomplete dropdown shows a ★ glyph in front of starred commands.
- *
- * Implementation notes:
- *   - We swap pi's editor with a subclass and pin its autocomplete provider
- *     to our wrapper that (a) sorts favs to the top in user order, and
- *     (b) decorates labels with ★ for starred items.
- *   - pi.getCommands() doesn't include built-ins, so we mirror the list at
- *     BUILTIN_COMMANDS below. Update if pi adds new builtins.
- *   - Wrapping the provider drops getArgumentCompletions for extension
- *     commands — direct typing still works fine.
+ * Implementation:
+ *   Instead of replacing pi's editor (which would clobber other extensions
+ *   that style/customize the editor — and break pi's welcome screen), we
+ *   monkey-patch `CombinedAutocompleteProvider.prototype.getSuggestions`
+ *   once. The patch only modifies slash-command results:
+ *     - When prefix is exactly "/", reorders items so favorites come first
+ *       in user order, with non-favorites following.
+ *     - Decorates every slash item's label with ★ (yellow) for starred
+ *       entries, "  " (two spaces) for unstarred — so columns align.
+ *   Original `item.value` is left untouched so completion still inserts
+ *   the bare `/name`.
  */
 
-import {
-	CustomEditor,
-	type ExtensionAPI,
-	type ExtensionContext,
-	type KeybindingsManager,
-	type SlashCommandInfo,
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	SlashCommandInfo,
 } from "@earendil-works/pi-coding-agent";
 import {
 	CombinedAutocompleteProvider,
@@ -35,16 +31,13 @@ import {
 	matchesKey,
 	truncateToWidth,
 	visibleWidth,
-	type AutocompleteItem,
-	type AutocompleteProvider,
-	type AutocompleteSuggestions,
-	type EditorTheme,
-	type TUI,
 } from "@earendil-works/pi-tui";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 // ─── Local mirror of pi's built-in slash commands ────────────────────────────
+// pi.getCommands() only returns extension/prompt/skill sources, so we keep
+// this list in sync manually for the picker. Update if pi adds new builtins.
 const BUILTIN_COMMANDS = [
 	{ name: "settings", description: "Open settings menu" },
 	{ name: "model", description: "Select model (opens selector UI)" },
@@ -80,7 +73,6 @@ const C = {
 	yellow: "249;226;175",
 	mauve: "203;166;247",
 	peach: "250;179;135",
-	blue: "137;180;250",
 };
 const fg = (rgb: string, s: string) => `\x1b[38;2;${rgb}m${s}\x1b[39m`;
 const bg = (rgb: string, s: string) => `\x1b[48;2;${rgb}m${s}\x1b[49m`;
@@ -90,6 +82,9 @@ function padTo(width: number, s: string): string {
 	if (w >= width) return truncateToWidth(s, width, "");
 	return s + " ".repeat(width - w);
 }
+
+const STAR_LABEL_PREFIX = fg(C.yellow, "★") + " ";
+const PLAIN_LABEL_PREFIX = "  ";
 
 // ─── Persistence (ordered array) ─────────────────────────────────────────────
 const FAV_PATH = join(process.env.HOME || "", ".pi/agent/data/slash-favorites.json");
@@ -147,7 +142,6 @@ class FavStore {
 		this.add(n);
 		return true;
 	}
-	/** Swap n with its neighbor in the favorites order. */
 	move(n: string, delta: number): boolean {
 		const i = this.order.indexOf(n);
 		if (i < 0) return false;
@@ -164,7 +158,54 @@ class FavStore {
 	}
 }
 
-// ─── Command list assembly ───────────────────────────────────────────────────
+// ─── Prototype patch (the only side effect on pi) ────────────────────────────
+let patched = false;
+
+function patchAutocomplete(favs: FavStore) {
+	if (patched) return;
+	patched = true;
+	const proto = CombinedAutocompleteProvider.prototype as any;
+	const original = proto.getSuggestions;
+	if (typeof original !== "function") return;
+	proto.getSuggestions = async function patchedGetSuggestions(
+		lines: string[],
+		cursorLine: number,
+		cursorCol: number,
+		options: any,
+	) {
+		const result = await original.call(this, lines, cursorLine, cursorCol, options);
+		if (!result) return result;
+		const prefix: string = result.prefix ?? "";
+		// Only touch slash-command results — leave @file / path completion alone.
+		const isSlash = prefix.startsWith("/") && !prefix.slice(1).includes("/");
+		if (!isSlash) return result;
+
+		let items = result.items as Array<{ value: string; label?: string; description?: string }>;
+		// When the user has typed just "/" (no query yet), surface favorites first
+		// in user-defined order. For "/foo" we keep the fuzzy ranking pi computed.
+		if (prefix === "/") {
+			const order = favs.list();
+			const favSet = new Set(order);
+			const byName = new Map(items.map((it) => [it.value, it]));
+			const favList: typeof items = [];
+			for (const name of order) {
+				const it = byName.get(name);
+				if (it) favList.push(it);
+			}
+			const rest = items.filter((it) => !favSet.has(it.value));
+			items = [...favList, ...rest];
+		}
+		// Decorate labels with ★ regardless of query so the marker is always visible.
+		items = items.map((it) => {
+			const baseLabel = it.label || it.value;
+			const prefixChar = favs.has(it.value) ? STAR_LABEL_PREFIX : PLAIN_LABEL_PREFIX;
+			return { ...it, label: `${prefixChar}${baseLabel}` };
+		});
+		return { ...result, items };
+	};
+}
+
+// ─── Command list assembly (for the picker) ──────────────────────────────────
 interface Cmd {
 	name: string;
 	description?: string;
@@ -173,122 +214,10 @@ interface Cmd {
 function getAllCommands(pi: ExtensionAPI): Cmd[] {
 	const all = new Map<string, Cmd>();
 	for (const b of BUILTIN_COMMANDS) all.set(b.name, { name: b.name, description: b.description });
-	for (const e of pi.getCommands()) {
+	for (const e of pi.getCommands() as SlashCommandInfo[]) {
 		if (!all.has(e.name)) all.set(e.name, { name: e.name, description: e.description });
 	}
 	return [...all.values()];
-}
-
-function buildSortedCommands(all: Cmd[], favs: FavStore): Cmd[] {
-	// Favorites in user-defined order, then non-favorites alphabetical.
-	const byName = new Map(all.map((c) => [c.name, c]));
-	const favList: Cmd[] = [];
-	for (const name of favs.list()) {
-		const c = byName.get(name);
-		if (c) favList.push(c);
-	}
-	const restList = all
-		.filter((c) => !favs.has(c.name))
-		.sort((a, b) => a.name.localeCompare(b.name));
-	return [...favList, ...restList];
-}
-
-// ─── Autocomplete provider that decorates starred entries with ★ ─────────────
-class StarredProvider implements AutocompleteProvider {
-	constructor(
-		private inner: CombinedAutocompleteProvider,
-		private favs: FavStore,
-	) {}
-
-	async getSuggestions(
-		lines: string[],
-		cursorLine: number,
-		cursorCol: number,
-		options: { signal: AbortSignal; force?: boolean },
-	): Promise<AutocompleteSuggestions | null> {
-		const result = await this.inner.getSuggestions(lines, cursorLine, cursorCol, options);
-		if (!result) return null;
-		// Only decorate slash-command suggestions, not @file / path results.
-		const isSlash =
-			result.prefix.startsWith("/") && !result.prefix.slice(1).includes("/");
-		if (!isSlash) return result;
-		const star = fg(C.yellow, "★");
-		const items: AutocompleteItem[] = result.items.map((it) => {
-			const baseLabel = it.label || it.value;
-			if (this.favs.has(it.value)) {
-				return { ...it, label: `${star} ${baseLabel}` };
-			}
-			// Two spaces so unstarred items align with starred ones.
-			return { ...it, label: `  ${baseLabel}` };
-		});
-		return { ...result, items };
-	}
-
-	applyCompletion(
-		lines: string[],
-		cursorLine: number,
-		cursorCol: number,
-		item: AutocompleteItem,
-		prefix: string,
-	) {
-		// item.value is the bare command name — pass through unchanged.
-		return this.inner.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
-	}
-
-	shouldTriggerFileCompletion(lines: string[], cursorLine: number, cursorCol: number): boolean {
-		return this.inner.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? false;
-	}
-}
-
-// ─── Custom editor with our autocomplete provider ────────────────────────────
-let currentEditor: SlashFavEditor | null = null;
-let currentBuild: (() => AutocompleteProvider) | null = null;
-
-class SlashFavEditor extends CustomEditor {
-	constructor(
-		tui: TUI,
-		theme: EditorTheme,
-		kb: KeybindingsManager,
-		build: () => AutocompleteProvider,
-	) {
-		super(tui, theme, kb);
-
-		const install = () => {
-			(this as any).autocompleteProvider = build();
-			const cancel = (this as any).cancelAutocomplete;
-			if (typeof cancel === "function") cancel.call(this);
-		};
-		install();
-		Object.defineProperty(this, "setAutocompleteProvider", {
-			value: (_p: AutocompleteProvider) => install(),
-			writable: true,
-			configurable: true,
-		});
-
-		currentEditor = this;
-		currentBuild = build;
-	}
-}
-
-function refreshProvider() {
-	if (currentEditor && currentBuild) {
-		currentEditor.setAutocompleteProvider(currentBuild());
-	}
-}
-
-function makeBuild(pi: ExtensionAPI, cwd: string, favs: FavStore) {
-	return () => {
-		const all = getAllCommands(pi);
-		const sorted = buildSortedCommands(all, favs);
-		const inner = new CombinedAutocompleteProvider(sorted as any, cwd, null);
-		return new StarredProvider(inner, favs);
-	};
-}
-
-function installEditor(pi: ExtensionAPI, ctx: ExtensionContext, favs: FavStore) {
-	if (!ctx.hasUI) return;
-	const build = makeBuild(pi, ctx.cwd, favs);
-	ctx.ui.setEditorComponent((tui, theme, kb) => new SlashFavEditor(tui, theme, kb, build));
 }
 
 // ─── Favorites picker overlay ────────────────────────────────────────────────
@@ -310,7 +239,6 @@ class FavoritesPicker {
 		this.items = this.computeItems();
 	}
 
-	/** Starred (in user order) then non-favorites (alpha), filtered by query. */
 	private computeItems(): Cmd[] {
 		const byName = new Map(this.allCommands.map((c) => [c.name, c]));
 		const starred: Cmd[] = [];
@@ -347,8 +275,6 @@ class FavoritesPicker {
 			this.onClose?.();
 			return;
 		}
-
-		// Shift+↑/↓ — reorder favorites (must come before plain up/down).
 		if (matchesKey(data, Key.shift("up")) || matchesKey(data, Key.shift("down"))) {
 			const cur = this.items[this.selected];
 			if (cur && this.favs.has(cur.name) && !this.filter.trim()) {
@@ -360,7 +286,6 @@ class FavoritesPicker {
 			this.invalidate();
 			return;
 		}
-
 		if (matchesKey(data, Key.up)) {
 			if (this.selected > 0) this.selected--;
 			this.invalidate();
@@ -438,7 +363,6 @@ class FavoritesPicker {
 		if (this.selected >= this.scroll + bodyH) this.scroll = this.selected - bodyH + 1;
 
 		const body: string[] = [];
-		// Track the favorites boundary so we can draw a separator between starred and rest.
 		const lastFavIdx =
 			[...this.items].map((c) => this.favs.has(c.name)).lastIndexOf(true);
 		for (let i = 0; i < bodyH; i++) {
@@ -459,7 +383,6 @@ class FavoritesPicker {
 			const truncated = truncateToWidth(line, innerW, "…");
 			const colored = isSel ? bg(C.surface0, padTo(innerW, truncated)) : padTo(innerW, truncated);
 			body.push(`${V}${colored}${V}`);
-			// Insert a faint separator after the last favorite row (only when not filtering).
 			if (
 				!this.filter.trim() &&
 				idx === lastFavIdx &&
@@ -468,7 +391,7 @@ class FavoritesPicker {
 			) {
 				const sep = fg(C.surface1, "  " + "─".repeat(Math.max(0, innerW - 4)));
 				body.push(`${V}${padTo(innerW, sep)}${V}`);
-				i++; // consume an extra row slot
+				i++;
 			}
 		}
 		if (this.items.length === 0) {
@@ -500,15 +423,7 @@ class FavoritesPicker {
 // ─── Entry ───────────────────────────────────────────────────────────────────
 export default function (pi: ExtensionAPI) {
 	const favs = new FavStore(loadOrder());
-
-	pi.on("session_start", async (_e, ctx) => {
-		installEditor(pi, ctx, favs);
-	});
-
-	pi.on("session_shutdown", async () => {
-		currentEditor = null;
-		currentBuild = null;
-	});
+	patchAutocomplete(favs);
 
 	pi.registerCommand("favorites", {
 		description: "Star/unstar slash commands so favorites appear first when you type /",
@@ -517,9 +432,11 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("/favorites requires an interactive UI", "error");
 				return;
 			}
-			installEditor(pi, ctx, favs);
-			const all = getAllCommands(pi);
+			// Guard: patch should already be applied at module load, but if pi
+			// hot-reloaded the module the closure may have changed — re-apply.
+			patchAutocomplete(favs);
 
+			const all = getAllCommands(pi);
 			await ctx.ui.custom<void>(
 				(tui, _theme, _kb, done) => {
 					const picker = new FavoritesPicker(all, favs);
@@ -545,7 +462,6 @@ export default function (pi: ExtensionAPI) {
 			);
 
 			favs.save();
-			refreshProvider();
 			const starred = favs.list().filter((n) => all.some((c) => c.name === n)).length;
 			ctx.ui.notify(`Saved ${starred} favorite${starred === 1 ? "" : "s"}.`, "info");
 		},
